@@ -3,7 +3,7 @@
     "name": "AndroidBoard",
     "slug": "AndroidBoard",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "landscape",
     "icon": "./assets/images/icon.png",
     "scheme": "androidboard",
     "userInterfaceStyle": "automatic",

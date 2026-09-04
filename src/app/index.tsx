@@ -1,98 +1,212 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import React, { useState } from 'react';
+import { StyleSheet, View, Image } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
+import { WhiteboardCanvas, DrawingTool, PathData, Point } from '../components/WhiteboardCanvas';
+import { Toolbar } from '../components/Toolbar';
+import { SlideSidebar } from '../components/SlideSidebar';
+import { PdfRenderer } from '../components/PdfRenderer';
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
-
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
-  return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
-  );
+interface SlideData {
+  id: string;
+  backgroundUri?: string;
+  paths: PathData[];
 }
 
 export default function HomeScreen() {
+  const [tool, setTool] = useState<DrawingTool>('pen');
+  const [slides, setSlides] = useState<SlideData[]>([{ id: Date.now().toString(), paths: [] }]);
+  const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
+  const [isSidebarVisible, setIsSidebarVisible] = useState(false);
+  
+  // PDF Renderer State
+  const [pdfUri, setPdfUri] = useState<string | null>(null);
+
+  const activeSlide = slides[currentSlideIndex];
+
+  const updateActiveSlide = (updater: (slide: SlideData) => SlideData) => {
+    setSlides(prev => prev.map((s, i) => i === currentSlideIndex ? updater(s) : s));
+  };
+
+  const handleClear = () => {
+    updateActiveSlide(s => ({ ...s, paths: [] }));
+  };
+
+  const handleImportPdf = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+      });
+      if (!result.canceled) {
+        setPdfUri(result.assets[0].uri);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleImportImage = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 1,
+      });
+      if (!result.canceled) {
+        updateActiveSlide(s => ({ ...s, backgroundUri: result.assets[0].uri }));
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handlePdfPagesRendered = (imageUris: string[]) => {
+    if (imageUris.length === 0) return;
+    
+    // Replace current slide with first page, add rest as new slides
+    const newSlides = [...slides];
+    newSlides[currentSlideIndex] = { ...newSlides[currentSlideIndex], backgroundUri: imageUris[0] };
+    
+    for (let i = 1; i < imageUris.length; i++) {
+      newSlides.push({ id: Date.now().toString() + i, paths: [], backgroundUri: imageUris[i] });
+    }
+    
+    setSlides(newSlides);
+    setPdfUri(null); // Cleanup
+  };
+
+  // Slide Manager Actions
+  const handleAddSlide = () => {
+    setSlides(prev => [...prev, { id: Date.now().toString(), paths: [] }]);
+    setCurrentSlideIndex(slides.length);
+  };
+
+  const handleMoveSlideUp = (index: number) => {
+    if (index === 0) return;
+    setSlides(prev => {
+      const newSlides = [...prev];
+      const temp = newSlides[index - 1];
+      newSlides[index - 1] = newSlides[index];
+      newSlides[index] = temp;
+      return newSlides;
+    });
+    if (currentSlideIndex === index) setCurrentSlideIndex(index - 1);
+    else if (currentSlideIndex === index - 1) setCurrentSlideIndex(index);
+  };
+
+  const handleMoveSlideDown = (index: number) => {
+    if (index === slides.length - 1) return;
+    setSlides(prev => {
+      const newSlides = [...prev];
+      const temp = newSlides[index + 1];
+      newSlides[index + 1] = newSlides[index];
+      newSlides[index] = temp;
+      return newSlides;
+    });
+    if (currentSlideIndex === index) setCurrentSlideIndex(index + 1);
+    else if (currentSlideIndex === index + 1) setCurrentSlideIndex(index);
+  };
+
+  const handleDeleteSlide = (index: number) => {
+    if (slides.length <= 1) return;
+    setSlides(prev => prev.filter((_, i) => i !== index));
+    if (currentSlideIndex >= slides.length - 1) {
+      setCurrentSlideIndex(slides.length - 2);
+    }
+  };
+
   return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
+    <GestureHandlerRootView style={styles.container}>
+      {/* Hidden Webview for PDF Processing */}
+      {pdfUri && (
+        <PdfRenderer pdfUri={pdfUri} onPagesRendered={handlePdfPagesRendered} />
+      )}
 
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
+      {/* Main Drawing Area */}
+      <View style={styles.boardArea}>
+        <WhiteboardCanvas 
+          tool={tool} 
+          paths={activeSlide.paths}
+          onPathsChange={(newPaths) => updateActiveSlide(s => ({ ...s, paths: newPaths }))}
+          backgroundUri={activeSlide.backgroundUri}
+        />
+        
+        {/* Page Indicator Bottom Left */}
+        <View style={styles.pageIndicatorContainer}>
+          <TouchableOpacity 
+            style={styles.eyeButton} 
+            onPress={() => setIsSidebarVisible(!isSidebarVisible)}
+          >
+            <MaterialCommunityIcons 
+              name={isSidebarVisible ? "eye-off-outline" : "eye-outline"} 
+              size={24} 
+              color="#333" 
+            />
+          </TouchableOpacity>
+          <Text style={styles.pageIndicatorText}>
+            {currentSlideIndex + 1} / {slides.length}
+          </Text>
+        </View>
 
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
+        <Toolbar
+          tool={tool}
+          setTool={setTool}
+          onClear={handleClear}
+          onImportPdf={handleImportPdf}
+          onImportImage={handleImportImage}
+        />
+      </View>
 
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
+      {/* Slide Sidebar Toggle */}
+      {isSidebarVisible && (
+        <SlideSidebar
+          slides={slides}
+          currentSlideIndex={currentSlideIndex}
+          onSelectSlide={setCurrentSlideIndex}
+          onAddSlide={handleAddSlide}
+          onMoveSlideUp={handleMoveSlideUp}
+          onMoveSlideDown={handleMoveSlideDown}
+          onDeleteSlide={handleDeleteSlide}
+        />
+      )}
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: 'center',
+    backgroundColor: '#fff',
     flexDirection: 'row',
   },
-  safeArea: {
+  boardArea: {
     flex: 1,
-    paddingHorizontal: Spacing.four,
+    backgroundColor: 'transparent',
+    position: 'relative',
+  },
+  pageIndicatorContainer: {
+    position: 'absolute',
+    bottom: 20,
+    left: 20,
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 25,
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
+  eyeButton: {
+    padding: 2,
   },
-  title: {
-    textAlign: 'center',
-  },
-  code: {
-    textTransform: 'uppercase',
-  },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
-  },
+  pageIndicatorText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+  }
 });
