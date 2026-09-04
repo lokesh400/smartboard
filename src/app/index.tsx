@@ -10,16 +10,10 @@ import { ImageOverlay, ImageOverlayLayer } from '../components/ImageOverlayLayer
 import { PdfRenderer } from '../components/PdfRenderer';
 import { SlideSidebar } from '../components/SlideSidebar';
 import { Toolbar } from '../components/Toolbar';
-import { DrawingTool, PathData, WhiteboardCanvas } from '../components/WhiteboardCanvas';
+import { DrawingTool, WhiteboardCanvas } from '../components/WhiteboardCanvas';
 import { exportToPdf, loadSession, saveSession } from '../utils/SessionManager';
 
-export interface SlideData {
-  id: string;
-  paths: PathData[];
-  backgroundUri?: string;
-  backgroundColor?: string;
-  images?: ImageOverlay[];  // floating draggable images
-}
+import type { SlideData } from '../types/SlideData';
 
 const DEFAULT_BG = '#000000';
 const DEFAULT_PEN = '#ffffff';
