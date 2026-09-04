@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { StyleSheet, View, Text } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import * as FileSystem from 'expo-file-system/legacy';
 
 interface PdfRendererProps {
   pdfUri: string;
@@ -82,12 +83,14 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
   };
 
   const injectPdfData = async () => {
-    // In a real implementation, you would read the file at pdfUri as base64
-    // using expo-file-system and inject it.
-    // For this demonstration, we assume pdfUri is a file URI.
-    // Normally:
-    // const base64 = await FileSystem.readAsStringAsync(pdfUri, { encoding: FileSystem.EncodingType.Base64 });
-    // webviewRef.current?.postMessage(JSON.stringify({ type: 'LOAD_PDF', base64 }));
+    try {
+      if (!pdfUri) return;
+      const base64 = await FileSystem.readAsStringAsync(pdfUri, { encoding: FileSystem.EncodingType.Base64 });
+      webviewRef.current?.postMessage(JSON.stringify({ type: 'LOAD_PDF', base64 }));
+    } catch (e: any) {
+      setError(e.toString());
+      console.error(e);
+    }
   };
 
   return (

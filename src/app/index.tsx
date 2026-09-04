@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { StyleSheet, View, Image } from 'react-native';
+import { StyleSheet, View, Image, TouchableOpacity, Text } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { WhiteboardCanvas, DrawingTool, PathData, Point } from '../components/WhiteboardCanvas';
 import { Toolbar } from '../components/Toolbar';
 import { SlideSidebar } from '../components/SlideSidebar';
@@ -134,18 +135,34 @@ export default function HomeScreen() {
         {/* Page Indicator Bottom Left */}
         <View style={styles.pageIndicatorContainer}>
           <TouchableOpacity 
-            style={styles.eyeButton} 
-            onPress={() => setIsSidebarVisible(!isSidebarVisible)}
+            style={styles.arrowButton} 
+            onPress={() => setCurrentSlideIndex(Math.max(0, currentSlideIndex - 1))}
+            disabled={currentSlideIndex === 0}
           >
             <MaterialCommunityIcons 
-              name={isSidebarVisible ? "eye-off-outline" : "eye-outline"} 
-              size={24} 
-              color="#333" 
+              name="chevron-left" 
+              size={28} 
+              color={currentSlideIndex === 0 ? "#ccc" : "#333"} 
             />
           </TouchableOpacity>
-          <Text style={styles.pageIndicatorText}>
-            {currentSlideIndex + 1} / {slides.length}
-          </Text>
+
+          <TouchableOpacity onPress={() => setIsSidebarVisible(!isSidebarVisible)}>
+            <Text style={styles.pageIndicatorText}>
+              {currentSlideIndex + 1} / {slides.length}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.arrowButton} 
+            onPress={() => setCurrentSlideIndex(Math.min(slides.length - 1, currentSlideIndex + 1))}
+            disabled={currentSlideIndex === slides.length - 1}
+          >
+            <MaterialCommunityIcons 
+              name="chevron-right" 
+              size={28} 
+              color={currentSlideIndex === slides.length - 1 ? "#ccc" : "#333"} 
+            />
+          </TouchableOpacity>
         </View>
 
         <Toolbar
@@ -201,8 +218,8 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 8,
   },
-  eyeButton: {
-    padding: 2,
+  arrowButton: {
+    padding: 4,
   },
   pageIndicatorText: {
     fontSize: 18,
