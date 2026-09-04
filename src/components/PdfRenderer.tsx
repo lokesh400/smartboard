@@ -8,65 +8,66 @@ interface PdfRendererProps {
   onPagesRendered: (imageUris: string[]) => void;
 }
 
-const htmlContent = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-  <style>
-    body { margin: 0; padding: 0; background-color: #f0f0f0; display: flex; flex-direction: column; align-items: center; }
-    canvas { margin-bottom: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
-  </style>
-</head>
-<body>
-  <div id="container"></div>
-  <script>
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-    
-    async function renderPdf(base64Data) {
-      try {
-        const loadingTask = pdfjsLib.getDocument({ data: atob(base64Data) });
-        const pdf = await loadingTask.promise;
-        const totalPages = pdf.numPages;
-        const images = [];
-
-        for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-          const page = await pdf.getPage(pageNum);
-          const viewport = page.getViewport({ scale: 1.5 });
-          
-          const canvas = document.createElement('canvas');
-          const context = canvas.getContext('2d');
-          canvas.height = viewport.height;
-          canvas.width = viewport.width;
-          
-          document.getElementById('container').appendChild(canvas);
-          
-          await page.render({ canvasContext: context, viewport: viewport }).promise;
-          images.push(canvas.toDataURL('image/jpeg', 0.8));
-        }
-        
-        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SUCCESS', images }));
-      } catch (error) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'ERROR', message: error.toString() }));
-      }
-    }
-
-    // Wait for the React Native side to inject the base64 data
-    window.addEventListener('message', function(event) {
-      const data = JSON.parse(event.data);
-      if (data.type === 'LOAD_PDF') {
-        renderPdf(data.base64);
-      }
-    });
-  </script>
-</body>
-</html>
-`;
-
 export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendered }) => {
   const webviewRef = useRef<WebView>(null);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState({ current: 0, total: 0 });
+
+  const htmlContent = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <style>
+      body { margin: 0; padding: 0; background-color: #f0f0f0; display: flex; flex-direction: column; align-items: center; }
+      canvas { margin-bottom: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+    </style>
+  </head>
+  <body>
+    <div id="container"></div>
+    <script>
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+      
+      async function renderPdf() {
+        try {
+          // Load directly from the local file URI
+          const loadingTask = pdfjsLib.getDocument('${pdfUri}');
+          const pdf = await loadingTask.promise;
+          const totalPages = pdf.numPages;
+          const images = [];
+
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'PROGRESS', current: 0, total: totalPages }));
+
+          for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+            const page = await pdf.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 1.5 });
+            
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            document.getElementById('container').appendChild(canvas);
+            
+            await page.render({ canvasContext: context, viewport: viewport }).promise;
+            images.push(canvas.toDataURL('image/jpeg', 0.8));
+            
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'PROGRESS', current: pageNum, total: totalPages }));
+          }
+          
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SUCCESS', images }));
+        } catch (error) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'ERROR', message: error.toString() }));
+        }
+      }
+
+      // Run immediately
+      renderPdf();
+    </script>
+  </body>
+  </html>
+  `;
 
   const handleMessage = (event: WebViewMessageEvent) => {
     try {
@@ -76,33 +77,34 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
       } else if (data.type === 'ERROR') {
         console.error('PDF Render Error:', data.message);
         setError(data.message);
+      } else if (data.type === 'PROGRESS') {
+        setProgress({ current: data.current, total: data.total });
+      } else if (data.type === 'LOG') {
+        console.log('PDF.js:', data.message);
       }
     } catch (e) {
       console.error('Failed to parse message from WebView', e);
     }
   };
 
-  const injectPdfData = async () => {
-    try {
-      if (!pdfUri) return;
-      const base64 = await FileSystem.readAsStringAsync(pdfUri, { encoding: FileSystem.EncodingType.Base64 });
-      webviewRef.current?.postMessage(JSON.stringify({ type: 'LOAD_PDF', base64 }));
-    } catch (e: any) {
-      setError(e.toString());
-      console.error(e);
-    }
-  };
-
   return (
-    <View style={StyleSheet.absoluteFill}>
+    <View style={[StyleSheet.absoluteFill, { zIndex: 9999, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }]}>
       <WebView
         ref={webviewRef}
         originWhitelist={['*']}
-        source={{ html: htmlContent }}
+        source={{ html: htmlContent, baseUrl: 'file:///' }}
+        allowFileAccess={true}
+        allowFileAccessFromFileURLs={true}
+        allowUniversalAccessFromFileURLs={true}
         onMessage={handleMessage}
-        onLoadEnd={injectPdfData}
-        style={{ flex: 1, opacity: 0 }} // Hidden webview just for processing
+        style={{ position: 'absolute', left: -10000, width: 1, height: 1 }}
       />
+      <View style={{ backgroundColor: '#fff', padding: 30, borderRadius: 16, alignItems: 'center', elevation: 10 }}>
+        <Text style={{ fontSize: 20, fontWeight: 'bold', marginBottom: 10 }}>Importing PDF...</Text>
+        <Text style={{ fontSize: 16, color: '#666' }}>
+          {progress.total > 0 ? `Rendering page ${progress.current} of ${progress.total}` : 'Loading document...'}
+        </Text>
+      </View>
       {error && <Text style={{ color: 'red', position: 'absolute', top: 50, left: 20 }}>Error loading PDF: {error}</Text>}
     </View>
   );
