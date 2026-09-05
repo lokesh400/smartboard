@@ -1,16 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, ScrollView } from 'react-native';
 import { Image } from 'expo-image';
-import { Canvas, Path, Skia } from '@shopify/react-native-skia';
+import { Canvas, Path, Skia, Group } from '@shopify/react-native-skia';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { PathData } from './WhiteboardCanvas';
+import type { SlideData } from '../types/SlideData';
 
-interface SlideData {
-  id: string;
-  backgroundUri?: string;
-  backgroundColor?: string;
-  paths: PathData[];
-}
 
 interface SlideSidebarProps {
   slides: SlideData[];
@@ -47,28 +41,20 @@ const SlideThumb: React.FC<{ slide: SlideData }> = ({ slide }) => {
       {/* Mini Skia canvas drawing the paths at thumbnail scale */}
       {slide.paths.length > 0 && (
         <Canvas style={StyleSheet.absoluteFill}>
-          {slide.paths.map((p, i) => {
-            const original = Skia.Path.MakeFromSVGString(p.svgPath);
-            if (!original) return null;
-
-            // Scale the path to thumbnail size
-            const matrix = Skia.Matrix();
-            matrix.scale(SCALE_X, SCALE_Y);
-            const scaled = original.copy();
-            scaled.transform(matrix);
-
-            return (
+          <Group transform={[{ scaleX: SCALE_X }, { scaleY: SCALE_Y }]}>
+            {slide.paths.map((p, i) => (
               <Path
                 key={i}
-                path={scaled}
+                path={p.svgPath}
                 color={p.isEraser ? bgColor : p.color}
                 style="stroke"
-                strokeWidth={Math.max(1, p.strokeWidth * Math.min(SCALE_X, SCALE_Y))}
-                strokeCap="round"
+                strokeWidth={p.strokeWidth}
+                strokeCap={p.isEraser ? 'square' : 'round'}
                 strokeJoin="round"
+                blendMode={p.isEraser ? 'clear' : 'srcOver'}
               />
-            );
-          })}
+            ))}
+          </Group>
         </Canvas>
       )}
 

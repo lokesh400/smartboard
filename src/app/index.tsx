@@ -1,12 +1,11 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useRef, useState } from 'react';
-import { Modal, PanResponder, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
-import { ImageOverlay, ImageOverlayLayer } from '../components/ImageOverlayLayer';
+import { ImageOverlay } from '../components/ImageOverlayLayer';
 import { PdfRenderer } from '../components/PdfRenderer';
 import { SlideSidebar } from '../components/SlideSidebar';
 import { Toolbar } from '../components/Toolbar';
@@ -19,8 +18,14 @@ const DEFAULT_BG = '#000000';
 const DEFAULT_PEN = '#ffffff';
 
 const BG_PRESETS = [
-  '#000000', '#1a1a2e', '#1e3d2f', '#2a2a2a',
-  '#ffffff', '#fffde7', '#e3f2fd', '#fce4ec',
+  '#000000', // Pure Black
+  '#1a1a2e', // Deep Navy
+  '#1e3d2f', // Dark Emerald
+  '#2d3142', // Independence Blue
+  '#4a4e69', // Muted Violet
+  '#2b2b2b', // Charcoal
+  '#f8f9fa', // Off White
+  '#ffffff', // Pure White
 ];
 
 export default function HomeScreen() {
@@ -28,9 +33,26 @@ export default function HomeScreen() {
   const [penColor, setPenColor] = useState<string>(DEFAULT_PEN);
   const [penWidth, setPenWidth] = useState<number>(5);
   const [defaultBg, setDefaultBg] = useState<string>(DEFAULT_BG);
-  const [slides, setSlides] = useState<SlideData[]>([
-    { id: Date.now().toString(), paths: [], backgroundColor: DEFAULT_BG },
-  ]);
+  const [history, setHistory] = useState<{ past: SlideData[][]; present: SlideData[]; future: SlideData[][] }>({
+    past: [],
+    present: [{ id: Date.now().toString(), paths: [], backgroundColor: DEFAULT_BG }],
+    future: [],
+  });
+  const slides = history.present;
+  const [clearStrokeTick, setClearStrokeTick] = useState(0);
+
+  const setSlides = (updater: SlideData[] | ((prev: SlideData[]) => SlideData[])) => {
+    setHistory(prev => {
+      const nextPresent = typeof updater === 'function' ? updater(prev.present) : updater;
+      // Do not push to history if state didn't change
+      if (nextPresent === prev.present) return prev;
+      return {
+        past: [...prev.past, prev.present],
+        present: nextPresent,
+        future: [],
+      };
+    });
+  };
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
 
@@ -41,38 +63,11 @@ export default function HomeScreen() {
   const [bgPickerVisible, setBgPickerVisible] = useState(false);
   const [pickedBgColor, setPickedBgColor] = useState<string>(DEFAULT_BG);
 
-  // Background Apply-Scope Modal (shown after color is chosen)
-  const [bgScopeVisible, setBgScopeVisible] = useState(false);
-  const [pendingBgConfig, setPendingBgConfig] = useState<{ type: 'color' | 'image'; value: string } | null>(null);
-
   const activeSlide = slides[currentSlideIndex];
 
   const updateActiveSlide = (updater: (slide: SlideData) => SlideData) => {
     setSlides(prev => prev.map((s, i) => (i === currentSlideIndex ? updater(s) : s)));
   };
-
-  // --- Hue slider for BG color picker ---
-  const HUE_WIDTH_BG = 240;
-  const bgHueRef = useRef(0);
-  const computeBgHue = (x: number): string => {
-    const clamped = Math.max(0, Math.min(x, HUE_WIDTH_BG));
-    bgHueRef.current = clamped;
-    const h = (clamped / HUE_WIDTH_BG) * 360;
-    const f = (n: number) => {
-      const k = (n + h / 30) % 12;
-      const color = 0.5 - 0.5 * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-      return Math.round(255 * color).toString(16).padStart(2, '0');
-    };
-    return `#${f(0)}${f(8)}${f(4)}`;
-  };
-  const bgHuePanResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => setPickedBgColor(computeBgHue(e.nativeEvent.locationX)),
-      onPanResponderMove: (e) => setPickedBgColor(computeBgHue(e.nativeEvent.locationX)),
-    })
-  ).current;
 
   // Step 1: open color picker
   const handleSelectBgColor = () => {
@@ -80,39 +75,23 @@ export default function HomeScreen() {
     setBgPickerVisible(true);
   };
 
-  // Step 2: color chosen → show scope modal
-  const confirmBgColor = () => {
-    setBgPickerVisible(false);
-    setPendingBgConfig({ type: 'color', value: pickedBgColor });
-    setBgScopeVisible(true);
-  };
-
-  // Step 3: apply to current or all
+  // Step 2: apply directly from the single modal
   const applyBackground = (applyToAll: boolean) => {
-    if (!pendingBgConfig) return;
-    const newBg = pendingBgConfig.type === 'color' ? pendingBgConfig.value : undefined;
-    const newUri = pendingBgConfig.type === 'image' ? pendingBgConfig.value : undefined;
-
     setSlides(prev =>
       prev.map((slide, i) => {
         if (applyToAll || i === currentSlideIndex) {
           return {
             ...slide,
-            backgroundColor: newBg,
-            backgroundUri: newUri,
+            backgroundColor: pickedBgColor,
+            backgroundUri: undefined, // remove image if setting color
           };
         }
         return slide;
       })
     );
 
-    // Keep defaultBg in sync when applying color
-    if (pendingBgConfig.type === 'color') {
-      setDefaultBg(pendingBgConfig.value);
-    }
-
-    setBgScopeVisible(false);
-    setPendingBgConfig(null);
+    setDefaultBg(pickedBgColor);
+    setBgPickerVisible(false);
   };
 
   // Insert image as floating element on canvas
@@ -136,13 +115,16 @@ export default function HomeScreen() {
     }
   };
 
-  // Set image as BACKGROUND (scope modal)
+  // Set image as BACKGROUND (applies to current slide immediately)
   const handleImportImageBg = async () => {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 });
       if (!result.canceled) {
-        setPendingBgConfig({ type: 'image', value: result.assets[0].uri });
-        setBgScopeVisible(true);
+        setSlides(prev => prev.map((slide, i) => 
+          i === currentSlideIndex 
+            ? { ...slide, backgroundUri: result.assets[0].uri, backgroundColor: undefined } 
+            : slide
+        ));
       }
     } catch (err) {
       console.error(err);
@@ -171,7 +153,38 @@ export default function HomeScreen() {
     setPdfUri(null);
   };
 
-  const handleClear = () => updateActiveSlide(s => ({ ...s, paths: [] }));
+  const handleClear = () => {
+    updateActiveSlide(s => ({ ...s, paths: [] }));
+    setClearStrokeTick(t => t + 1);
+  };
+
+  const handleUndo = () => {
+    setHistory(prev => {
+      if (prev.past.length === 0) return prev;
+      setClearStrokeTick(t => t + 1);
+      const newPast = [...prev.past];
+      const previous = newPast.pop()!;
+      return {
+        past: newPast,
+        present: previous,
+        future: [...prev.future, prev.present],
+      };
+    });
+  };
+
+  const handleRedo = () => {
+    setHistory(prev => {
+      if (prev.future.length === 0) return prev;
+      setClearStrokeTick(t => t + 1);
+      const newFuture = [...prev.future];
+      const next = newFuture.pop()!;
+      return {
+        past: [...prev.past, prev.present],
+        present: next,
+        future: newFuture,
+      };
+    });
+  };
 
   const handleSave = () => saveSession(slides);
 
@@ -185,10 +198,16 @@ export default function HomeScreen() {
 
   const handleExportPdf = () => exportToPdf(slides);
 
-  // New slide inherits current defaultBg
+  // New slide inherits current defaultBg and is inserted immediately after the current slide
   const handleAddSlide = () => {
-    setSlides(prev => [...prev, { id: Date.now().toString(), paths: [], backgroundColor: defaultBg }]);
-    setCurrentSlideIndex(slides.length);
+    setSlides(prev => {
+      const newSlide = { id: Date.now().toString(), paths: [], backgroundColor: defaultBg };
+      const nextIndex = currentSlideIndex + 1;
+      const ns = [...prev];
+      ns.splice(nextIndex, 0, newSlide);
+      return ns;
+    });
+    setCurrentSlideIndex(currentSlideIndex + 1);
   };
 
   const handleMoveSlideUp = (index: number) => {
@@ -228,7 +247,10 @@ export default function HomeScreen() {
         <SlideSidebar
           slides={slides}
           currentSlideIndex={currentSlideIndex}
-          onSelectSlide={setCurrentSlideIndex}
+          onSelectSlide={(i) => {
+            setCurrentSlideIndex(i);
+            setClearStrokeTick(t => t + 1);
+          }}
           onAddSlide={handleAddSlide}
           onMoveSlideUp={handleMoveSlideUp}
           onMoveSlideDown={handleMoveSlideDown}
@@ -240,24 +262,26 @@ export default function HomeScreen() {
         <WhiteboardCanvas
           tool={tool}
           paths={activeSlide.paths}
-          onPathsChange={newPaths => updateActiveSlide(s => ({ ...s, paths: newPaths }))}
+          onPathsChange={newPaths => updateActiveSlide(s => ({ 
+            ...s, 
+            paths: newPaths,
+          }))}
+          images={activeSlide.images || []}
+          onImagesChange={imgs => updateActiveSlide(s => ({ ...s, images: imgs }))}
           backgroundUri={activeSlide.backgroundUri}
           penColor={penColor}
           penWidth={penWidth}
+          clearStrokeTick={clearStrokeTick}
           onSwipeLeft={() => setCurrentSlideIndex(i => Math.min(slides.length - 1, i + 1))}
           onSwipeRight={() => setCurrentSlideIndex(i => Math.max(0, i - 1))}
-        />
-
-        {/* Floating Image Overlays */}
-        <ImageOverlayLayer
-          images={activeSlide.images || []}
-          onUpdate={imgs => updateActiveSlide(s => ({ ...s, images: imgs }))}
-          isInteractive={tool === 'pan'}
         />
         <View style={styles.pageIndicatorContainer}>
           <TouchableOpacity
             style={styles.arrowButton}
-            onPress={() => setCurrentSlideIndex(Math.max(0, currentSlideIndex - 1))}
+            onPress={() => {
+              setCurrentSlideIndex(Math.max(0, currentSlideIndex - 1));
+              setClearStrokeTick(t => t + 1);
+            }}
             disabled={currentSlideIndex === 0}
           >
             <MaterialCommunityIcons
@@ -275,7 +299,10 @@ export default function HomeScreen() {
 
           <TouchableOpacity
             style={styles.arrowButton}
-            onPress={() => setCurrentSlideIndex(Math.min(slides.length - 1, currentSlideIndex + 1))}
+            onPress={() => {
+              setCurrentSlideIndex(Math.min(slides.length - 1, currentSlideIndex + 1));
+              setClearStrokeTick(t => t + 1);
+            }}
             disabled={currentSlideIndex === slides.length - 1}
           >
             <MaterialCommunityIcons
@@ -305,20 +332,24 @@ export default function HomeScreen() {
           onSave={handleSave}
           onLoad={handleLoad}
           onExportPdf={handleExportPdf}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          canUndo={history.past.length > 0}
+          canRedo={history.future.length > 0}
         />
       </View>
 
-      {/* ─── Step 1: Background Color Picker ─── */}
+      {/* ─── Background Color Modal ─── */}
       <Modal transparent visible={bgPickerVisible} animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Choose Background Color</Text>
-
+            <Text style={styles.modalTitle}>Background Style</Text>
+            
             {/* Live preview */}
             <View style={[styles.bgPreview, { backgroundColor: pickedBgColor }]} />
 
             {/* Presets */}
-            <Text style={styles.modalLabel}>Presets</Text>
+            <Text style={styles.modalLabel}>Curated Palettes</Text>
             <View style={styles.colorGrid}>
               {BG_PRESETS.map(c => (
                 <TouchableOpacity
@@ -327,59 +358,24 @@ export default function HomeScreen() {
                     styles.bgSwatch,
                     { backgroundColor: c },
                     pickedBgColor === c && styles.bgSwatchActive,
-                    c === '#ffffff' && { borderWidth: 1, borderColor: '#ccc' },
+                    (c === '#ffffff' || c === '#f8f9fa') && { borderWidth: 1, borderColor: '#e0e0e0' },
                   ]}
                   onPress={() => setPickedBgColor(c)}
                 />
               ))}
             </View>
 
-            {/* Custom hue slider */}
-            <Text style={styles.modalLabel}>Custom (drag)</Text>
-            <View style={styles.hueBar} {...bgHuePanResponder.panHandlers}>
-              <LinearGradient
-                colors={['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff', '#ff0000']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={StyleSheet.absoluteFill}
-                pointerEvents="none"
-              />
-            </View>
-
-            <View style={styles.modalRow}>
+            <View style={styles.modalActionStack}>
+              <TouchableOpacity style={styles.modalBtnPrimary} onPress={() => applyBackground(false)}>
+                <Text style={styles.modalBtnTextPrimary}>Apply to Current Slide</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalBtnSecondary} onPress={() => applyBackground(true)}>
+                <Text style={styles.modalBtnTextSecondary}>Apply to All Slides</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setBgPickerVisible(false)}>
                 <Text style={styles.modalBtnTextCancel}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.modalBtnPrimary} onPress={confirmBgColor}>
-                <Text style={styles.modalBtnTextPrimary}>Next →</Text>
-              </TouchableOpacity>
             </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* ─── Step 2: Apply Scope ─── */}
-      <Modal transparent visible={bgScopeVisible} animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Apply Background</Text>
-            <Text style={styles.modalSubtitle}>Where would you like to apply this?</Text>
-
-            {pendingBgConfig?.type === 'color' && (
-              <View style={[styles.bgPreview, { backgroundColor: pendingBgConfig.value, marginBottom: 16 }]} />
-            )}
-
-            <TouchableOpacity style={styles.modalBtnPrimary} onPress={() => applyBackground(false)}>
-              <Text style={styles.modalBtnTextPrimary}>Current Slide Only</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={[styles.modalBtnSecondary, { marginTop: 10 }]} onPress={() => applyBackground(true)}>
-              <Text style={styles.modalBtnTextSecondary}>Apply to ALL Slides</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.modalBtnCancel} onPress={() => { setBgScopeVisible(false); setPendingBgConfig(null); }}>
-              <Text style={styles.modalBtnTextCancel}>Cancel</Text>
-            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -447,15 +443,7 @@ const styles = StyleSheet.create({
   bgSwatch: { width: 32, height: 32, borderRadius: 16 },
   bgSwatchActive: { borderWidth: 3, borderColor: '#4fc3f7' },
 
-  hueBar: {
-    width: '100%',
-    height: 28,
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginBottom: 20,
-  },
-
-  modalRow: { flexDirection: 'row', gap: 12, marginTop: 4 },
+  modalActionStack: { width: '100%', marginTop: 8, alignItems: 'center' },
   modalBtnPrimary: {
     backgroundColor: '#007AFF',
     width: '100%',

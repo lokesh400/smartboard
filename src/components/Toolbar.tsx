@@ -20,12 +20,17 @@ interface ToolbarProps {
   onSave: () => void;
   onLoad: () => void;
   onExportPdf: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
   tool, setTool, onClear, onImportPdf, onImportImage, onImportImageBg,
   penColor, setPenColor, penWidth, setPenWidth,
   onSelectBgColor, onSave, onLoad, onExportPdf,
+  onUndo, onRedo, canUndo, canRedo,
 }) => {
   const [menuVisible, setMenuVisible] = useState(false);   // + import menu
   const [moreVisible, setMoreVisible] = useState(false);   // ⋮ more menu
@@ -86,6 +91,22 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
       <TouchableOpacity style={styles.button} onPress={onClear}>
         <MaterialCommunityIcons name="delete-outline" size={20} color="#FF453A" />
+      </TouchableOpacity>
+
+      <TouchableOpacity 
+        style={[styles.button, !canUndo && { opacity: 0.3 }]} 
+        onPress={onUndo} 
+        disabled={!canUndo}
+      >
+        <MaterialCommunityIcons name="undo" size={20} color="#fff" />
+      </TouchableOpacity>
+
+      <TouchableOpacity 
+        style={[styles.button, !canRedo && { opacity: 0.3 }]} 
+        onPress={onRedo} 
+        disabled={!canRedo}
+      >
+        <MaterialCommunityIcons name="redo" size={20} color="#fff" />
       </TouchableOpacity>
 
       {/* ─── + Import Menu ─── */}

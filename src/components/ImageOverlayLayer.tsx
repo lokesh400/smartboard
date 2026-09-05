@@ -1,7 +1,22 @@
-import React, { useRef } from 'react';
-import { View, PanResponder, StyleSheet, TouchableOpacity } from 'react-native';
+/**
+ * ImageOverlayLayer.tsx
+ *
+ * Floating, draggable, pinch-resizable images on the whiteboard.
+ * Uses RNGH gestures (NOT PanResponder) so they coexist correctly
+ * with the canvas GestureDetector.
+ *
+ * - Pan gesture  → move the image
+ * - Pinch gesture → scale (resize) the image
+ * - Both run simultaneously
+ * - Gestures only enabled when isInteractive (pan tool active)
+ */
+import React, { useCallback } from 'react';
+import { StyleSheet, TouchableOpacity, View } from 'react-native';
 import { Image } from 'expo-image';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, { runOnJS, useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
+import { useEffect } from 'react';
 
 export interface ImageOverlay {
   id: string;
@@ -15,104 +30,155 @@ export interface ImageOverlay {
 interface Props {
   images: ImageOverlay[];
   onUpdate: (images: ImageOverlay[]) => void;
-  isInteractive: boolean; // only draggable when pan tool is active
+  isInteractive: boolean; // true when pan tool is active
 }
 
 const MIN_SIZE = 60;
 
+// ─── Single draggable/resizable image ────────────────────────────────────────
 const DraggableImage: React.FC<{
   img: ImageOverlay;
+  isInteractive: boolean;
   onMove: (id: string, x: number, y: number) => void;
   onResize: (id: string, w: number, h: number) => void;
   onDelete: (id: string) => void;
-  isInteractive: boolean;
-}> = ({ img, onMove, onResize, onDelete, isInteractive }) => {
-  const lastPos = useRef({ x: img.x, y: img.y });
-  const lastSize = useRef({ w: img.width, h: img.height });
+}> = ({ img, isInteractive, onMove, onResize, onDelete }) => {
+  // Saved values at gesture start (set once in onStart, read in onUpdate)
+  const startX = useSharedValue(0);
+  const startY = useSharedValue(0);
+  const startW = useSharedValue(0);
+  const startH = useSharedValue(0);
 
-  const dragPan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => isInteractive,
-      onMoveShouldSetPanResponder: () => isInteractive,
-      onPanResponderGrant: () => {
-        lastPos.current = { x: img.x, y: img.y };
-      },
-      onPanResponderMove: (_, gs) => {
-        onMove(img.id, lastPos.current.x + gs.dx, lastPos.current.y + gs.dy);
-      },
-    })
-  ).current;
+  // JS callbacks (stable references via useCallback)
+  const move = useCallback(
+    (newX: number, newY: number) => onMove(img.id, newX, newY),
+    [img.id, onMove],
+  );
+  const resize = useCallback(
+    (newW: number, newH: number) =>
+      onResize(img.id, Math.max(MIN_SIZE, newW), Math.max(MIN_SIZE, newH)),
+    [img.id, onResize],
+  );
 
-  const resizePan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => isInteractive,
-      onMoveShouldSetPanResponder: () => isInteractive,
-      onPanResponderGrant: () => {
-        lastSize.current = { w: img.width, h: img.height };
-      },
-      onPanResponderMove: (_, gs) => {
-        const newW = Math.max(MIN_SIZE, lastSize.current.w + gs.dx);
-        const newH = Math.max(MIN_SIZE, lastSize.current.h + gs.dy);
-        onResize(img.id, newW, newH);
-      },
+  // Live transform state on UI thread for zero-latency dragging
+  const liveX = useSharedValue(img.x);
+  const liveY = useSharedValue(img.y);
+  const liveW = useSharedValue(img.width);
+  const liveH = useSharedValue(img.height);
+
+  // Sync if updated from outside (e.g., undo/redo or initial load)
+  useEffect(() => {
+    liveX.value = img.x;
+    liveY.value = img.y;
+    liveW.value = img.width;
+    liveH.value = img.height;
+  }, [img.x, img.y, img.width, img.height]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    left: liveX.value,
+    top: liveY.value,
+    width: liveW.value,
+    height: liveH.value,
+  }));
+
+  // ── Pan: drag image ────────────────────────────────────────────────────────
+  const dragGesture = Gesture.Pan()
+    .enabled(isInteractive)
+    .onStart(() => {
+      startX.value = liveX.value;
+      startY.value = liveY.value;
     })
-  ).current;
+    .onUpdate((e) => {
+      liveX.value = startX.value + e.translationX;
+      liveY.value = startY.value + e.translationY;
+    })
+    .onEnd(() => {
+      runOnJS(move)(liveX.value, liveY.value);
+    });
+
+  // ── Pan: drag corner to resize image ───────────────────────────────────────
+  const resizeGesture = Gesture.Pan()
+    .enabled(isInteractive)
+    .onStart(() => {
+      startW.value = liveW.value;
+      startH.value = liveH.value;
+    })
+    .onUpdate((e) => {
+      liveW.value = Math.max(MIN_SIZE, startW.value + e.translationX);
+      liveH.value = Math.max(MIN_SIZE, startH.value + e.translationY);
+    })
+    .onEnd(() => {
+      runOnJS(resize)(liveW.value, liveH.value);
+    });
 
   return (
-    <View
-      style={[styles.imageWrapper, { left: img.x, top: img.y, width: img.width, height: img.height }]}
-      {...dragPan.panHandlers}
-    >
-      <Image
-        source={{ uri: img.uri }}
-        style={StyleSheet.absoluteFill}
-        contentFit="contain"
-        cachePolicy="memory-disk"
-      />
+    <GestureDetector gesture={dragGesture}>
+      <Animated.View
+        style={[styles.wrapper, animatedStyle]}
+      >
+        <Image
+          source={{ uri: img.uri }}
+          style={StyleSheet.absoluteFill}
+          contentFit="contain"
+          cachePolicy="memory-disk"
+        />
 
-      {/* Delete button — top-right */}
-      {isInteractive && (
-        <TouchableOpacity style={styles.deleteBtn} onPress={() => onDelete(img.id)}>
-          <MaterialCommunityIcons name="close-circle" size={22} color="#FF453A" />
-        </TouchableOpacity>
-      )}
+        {/* Selection border */}
+        {isInteractive && <View style={styles.border} pointerEvents="none" />}
 
-      {/* Resize handle — bottom-right */}
-      {isInteractive && (
-        <View style={styles.resizeHandle} {...resizePan.panHandlers}>
-          <MaterialCommunityIcons name="resize-bottom-right" size={16} color="#fff" />
-        </View>
-      )}
+        {/* Delete button */}
+        {isInteractive && (
+          <TouchableOpacity
+            style={styles.deleteBtn}
+            onPress={() => onDelete(img.id)}
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          >
+            <MaterialCommunityIcons name="close-circle" size={24} color="#FF453A" />
+          </TouchableOpacity>
+        )}
 
-      {/* Border to show selected state */}
-      {isInteractive && <View style={styles.border} pointerEvents="none" />}
-    </View>
+        {/* Resize handle */}
+        {isInteractive && (
+          <GestureDetector gesture={resizeGesture}>
+            <View style={styles.resizeHandle}>
+              <MaterialCommunityIcons name="resize-bottom-right" size={16} color="#4fc3f7" />
+            </View>
+          </GestureDetector>
+        )}
+      </Animated.View>
+    </GestureDetector>
   );
 };
 
+// ─── Layer that holds all images ──────────────────────────────────────────────
 export const ImageOverlayLayer: React.FC<Props> = ({ images, onUpdate, isInteractive }) => {
-  const handleMove = (id: string, x: number, y: number) => {
-    onUpdate(images.map(img => img.id === id ? { ...img, x, y } : img));
-  };
+  const handleMove = useCallback(
+    (id: string, x: number, y: number) =>
+      onUpdate(images.map((img) => (img.id === id ? { ...img, x, y } : img))),
+    [images, onUpdate],
+  );
 
-  const handleResize = (id: string, w: number, h: number) => {
-    onUpdate(images.map(img => img.id === id ? { ...img, width: w, height: h } : img));
-  };
+  const handleResize = useCallback(
+    (id: string, width: number, height: number) =>
+      onUpdate(images.map((img) => (img.id === id ? { ...img, width, height } : img))),
+    [images, onUpdate],
+  );
 
-  const handleDelete = (id: string) => {
-    onUpdate(images.filter(img => img.id !== id));
-  };
+  const handleDelete = useCallback(
+    (id: string) => onUpdate(images.filter((img) => img.id !== id)),
+    [images, onUpdate],
+  );
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-      {images.map(img => (
+      {images.map((img) => (
         <DraggableImage
           key={img.id}
           img={img}
+          isInteractive={isInteractive}
           onMove={handleMove}
           onResize={handleResize}
           onDelete={handleDelete}
-          isInteractive={isInteractive}
         />
       ))}
     </View>
@@ -120,16 +186,24 @@ export const ImageOverlayLayer: React.FC<Props> = ({ images, onUpdate, isInterac
 };
 
 const styles = StyleSheet.create({
-  imageWrapper: {
+  wrapper: {
     position: 'absolute',
+  },
+  border: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    borderWidth: 1.5,
+    borderColor: '#4fc3f7',
+    borderStyle: 'dashed',
+    borderRadius: 4,
   },
   deleteBtn: {
     position: 'absolute',
-    top: -10,
-    right: -10,
+    top: -12,
+    right: -12,
     backgroundColor: '#1a1a1a',
-    borderRadius: 11,
-    zIndex: 10,
+    borderRadius: 12,
+    zIndex: 20,
   },
   resizeHandle: {
     position: 'absolute',
@@ -142,12 +216,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 10,
-  },
-  border: {
-    ...StyleSheet.absoluteFillObject,
-    borderWidth: 1.5,
-    borderColor: '#4fc3f7',
-    borderStyle: 'dashed',
-    borderRadius: 4,
   },
 });

@@ -1,19 +1,36 @@
-import React from 'react';
+/**
+ * WhiteboardCanvas.tsx
+ *
+ * Key rendering optimisations:
+ *
+ * 1. NO-BLINK: svgStr is NOT cleared in onEnd. It persists on the UI thread
+ *    until the next stroke's onStart overwrites it. This means the live stroke
+ *    stays visible while React processes commitStroke, so there's never a
+ *    blank frame between live and committed path.
+ *
+ * 2. SMOOTH CURVES: each touch point is converted to a quadratic Bézier
+ *    segment (Q cpX cpY midX midY) through the midpoint, so the drawn line
+ *    curves naturally instead of producing jagged straight segments.
+ *
+ * 3. PATH CACHE: committed paths are parsed into Skia objects via useMemo so
+ *    Skia.Path.MakeFromSVGString is NOT called on every drawing frame — only
+ *    when a new stroke is committed.
+ */
+import React, { useRef, useMemo, useCallback, useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Image } from 'expo-image';
 import {
-  Canvas,
-  Path,
-  Skia,
-  useCanvasRef,
+  Canvas, Path, Skia, useCanvasRef,
 } from '@shopify/react-native-skia';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
   runOnJS,
+  useAnimatedStyle,
   useDerivedValue,
+  useSharedValue,
 } from 'react-native-reanimated';
+
+import { ImageOverlayLayer, ImageOverlay } from './ImageOverlayLayer';
 
 export type DrawingTool = 'pen' | 'eraser' | 'pan';
 
@@ -28,185 +45,137 @@ interface WhiteboardCanvasProps {
   tool: DrawingTool;
   paths: PathData[];
   onPathsChange: (newPaths: PathData[]) => void;
+  images: ImageOverlay[];
+  onImagesChange: (newImages: ImageOverlay[]) => void;
   backgroundUri?: string;
   penColor: string;
   penWidth: number;
+  clearStrokeTick: number;
   onSwipeLeft?: () => void;
   onSwipeRight?: () => void;
 }
 
-const PALM_ERASER_SIZE = 60;
+const PALM_SIZE = 64;
 
 export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
-  tool, paths, onPathsChange, backgroundUri, penColor, penWidth,
-  onSwipeLeft, onSwipeRight,
+  tool, paths, onPathsChange, images, onImagesChange, backgroundUri, penColor, penWidth, clearStrokeTick,
 }) => {
   const canvasRef = useCanvasRef();
 
-  // ─── Pan / Zoom ─────────────────────────────────────────────────────────
-  const scale        = useSharedValue(1);
-  const savedScale   = useSharedValue(1);
-  const translateX   = useSharedValue(0);
-  const translateY   = useSharedValue(0);
-  const savedTX      = useSharedValue(0);
-  const savedTY      = useSharedValue(0);
+  useEffect(() => {
+    if (clearStrokeTick > 0) {
+      drawSvg.value = '';
+    }
+  }, [clearStrokeTick]);
 
-  // ─── Stroke state ────────────────────────────────────────────────────────
-  const activeSvg      = useSharedValue('');   // current live stroke SVG string
-  const isErasing      = useSharedValue(false);// true for both eraser tool AND palm erase
-  const isPalmErasing  = useSharedValue(false);// true ONLY when 3+ fingers detected
-  const palmX          = useSharedValue(-200);
-  const palmY          = useSharedValue(-200);
-  const prevNumPtrs    = useSharedValue(0);    // helps detect mid-gesture finger changes
+  // ─── Stroke shared values ──────────────────────────────────────────────────
+  const drawSvg    = useSharedValue('');      // live pen stroke
+  const asEraser   = useSharedValue(false);
+  const eraserSize = useSharedValue(PALM_SIZE);
 
-  // Clear live stroke when slide switches (paths becomes empty)
-  React.useEffect(() => {
-    if (paths.length === 0) activeSvg.value = '';
-  }, [paths.length === 0]);
+  // Previous touch point — used for Bézier midpoint calculation
+  const prevX = useSharedValue(0.0);
+  const prevY = useSharedValue(0.0);
 
-  // ─── Commit stroke to JS state ───────────────────────────────────────────
-  const handleEnd = (svg: string, isEraser: boolean) => {
-    if (!svg || !svg.includes('L')) return; // ignore tap-only (no movement)
+  // Flag: was the gesture completed normally (onEnd fired)?
+  // Used to distinguish a completed stroke from a cancelled one in onFinalize.
+  const drawDidEnd = useSharedValue(false);
+
+  // ─── Stale-closure-safe refs ──────────────────────────────────────────────
+  const pathsRef  = useRef(paths);   pathsRef.current  = paths;
+  const colorRef  = useRef(penColor); colorRef.current  = penColor;
+  const widthRef  = useRef(penWidth); widthRef.current  = penWidth;
+
+  const commitStroke = useCallback((svg: string, eraser: boolean, customWidth?: number) => {
+    if (!svg || !svg.includes(' Q ') && !svg.includes(' L ')) return;
     onPathsChange([
-      ...paths,
+      ...pathsRef.current,
       {
         svgPath: svg,
-        color: isEraser ? '#000000' : penColor,
-        strokeWidth: isEraser ? PALM_ERASER_SIZE : penWidth,
-        isEraser,
+        color: eraser ? '#000000' : colorRef.current,
+        strokeWidth: eraser ? (customWidth || PALM_SIZE) : widthRef.current,
+        isEraser: eraser,
       },
     ]);
-  };
+  }, [onPathsChange]);
 
-  // ─── UNIFIED gesture: 1 finger = draw / 2 fingers = pan / 3+ fingers = palm erase ──
-  //
-  // Why unified? If we use Race(palm, draw), the 1-finger draw gesture wins
-  // immediately before finger 2 and 3 land, so the palm eraser never activates.
-  // With a single Pan(minPointers:1, maxPointers:10) we read numberOfPointers
-  // inside each callback and switch mode dynamically, even mid-gesture.
-  const mainGesture = Gesture.Pan()
+  // ─── Committed path cache ─────────────────────────────────────────────────
+  // Parses SVG strings into Skia Path objects. Recalculated only when the
+  // paths array changes (i.e. when a stroke is committed), NOT on every
+  // drawing frame. This avoids the expensive MakeFromSVGString per frame.
+  const parsedPaths = useMemo(
+    () => paths.map(p => ({ p, sk: Skia.Path.MakeFromSVGString(p.svgPath) })),
+    [paths],
+  );
+
+  // ─── Unified drawing and erasing gesture ─────────────────────────────────
+  const drawGesture = Gesture.Pan()
     .minPointers(1)
-    .maxPointers(10)  // accept any number of fingers
+    .maxPointers(10) // allow all fingers for massive eraser
+    .minDistance(1)
+    .enabled(tool === 'pen' || tool === 'eraser')
     .onStart((e) => {
-      prevNumPtrs.value = e.numberOfPointers;
-
-      if (e.numberOfPointers >= 3) {
-        // ── Palm erase START ───────────────────────────────────────────────
-        isErasing.value     = true;
-        isPalmErasing.value = true;
-        palmX.value = e.x;
-        palmY.value = e.y;
-        const ax = (e.x - translateX.value) / scale.value;
-        const ay = (e.y - translateY.value) / scale.value;
-        activeSvg.value = `M ${ax} ${ay}`;
-
-      } else if (e.numberOfPointers === 2 || tool === 'pan') {
-        // ── Pan START ──────────────────────────────────────────────────────
-        savedTX.value = translateX.value;
-        savedTY.value = translateY.value;
-        activeSvg.value = '';
-
+      // A closed fist or palm often registers as 2+ pointers on capacitive screens
+      if (e.numberOfPointers >= 2) {
+        asEraser.value = true;
+        eraserSize.value = Math.max(120, e.numberOfPointers * 50); // Massive dynamic size for fist/palm
       } else {
-        // ── Draw/Erase (1 finger) START ────────────────────────────────────
-        isErasing.value     = tool === 'eraser';
-        isPalmErasing.value = false;
-        const ax = (e.x - translateX.value) / scale.value;
-        const ay = (e.y - translateY.value) / scale.value;
-        activeSvg.value = `M ${ax} ${ay}`;
+        asEraser.value = tool === 'eraser';
+        eraserSize.value = PALM_SIZE;
       }
+      
+      drawSvg.value  = `M ${e.x} ${e.y}`;
+      prevX.value    = e.x;
+      prevY.value    = e.y;
+      drawDidEnd.value = false;
     })
     .onUpdate((e) => {
-      const n = e.numberOfPointers;
-
-      if (n >= 3) {
-        // ── Palm erase CONTINUE ────────────────────────────────────────────
-        if (prevNumPtrs.value < 3) {
-          // Mid-gesture: fingers jumped to 3. Reset the path so the old
-          // single-finger stroke is discarded and erasing starts fresh.
-          isErasing.value     = true;
-          isPalmErasing.value = true;
-          const ax = (e.x - translateX.value) / scale.value;
-          const ay = (e.y - translateY.value) / scale.value;
-          activeSvg.value = `M ${ax} ${ay}`;
-        } else {
-          const ax = (e.x - translateX.value) / scale.value;
-          const ay = (e.y - translateY.value) / scale.value;
-          activeSvg.value += ` L ${ax} ${ay}`;
-        }
-        palmX.value = e.x;
-        palmY.value = e.y;
-
-      } else if (n === 2 || tool === 'pan') {
-        // ── Pan CONTINUE ───────────────────────────────────────────────────
-        translateX.value = savedTX.value + e.translationX;
-        translateY.value = savedTY.value + e.translationY;
-
-      } else if (n === 1 && !isPalmErasing.value) {
-        // ── Draw/Erase (1 finger) CONTINUE ────────────────────────────────
-        const ax = (e.x - translateX.value) / scale.value;
-        const ay = (e.y - translateY.value) / scale.value;
-        activeSvg.value += ` L ${ax} ${ay}`;
+      // If user adds more fingers mid-stroke, upgrade it to a palm eraser seamlessly!
+      if (e.numberOfPointers >= 2) {
+        asEraser.value = true;
+        eraserSize.value = Math.max(eraserSize.value, Math.max(120, e.numberOfPointers * 50));
       }
-
-      prevNumPtrs.value = n;
+      
+      const mx = (prevX.value + e.x) / 2;
+      const my = (prevY.value + e.y) / 2;
+      drawSvg.value += ` Q ${prevX.value} ${prevY.value} ${mx} ${my}`;
+      prevX.value = e.x;
+      prevY.value = e.y;
     })
     .onEnd(() => {
-      if (activeSvg.value && activeSvg.value.includes('L')) {
-        runOnJS(handleEnd)(activeSvg.value, isErasing.value);
+      drawDidEnd.value = true;
+      runOnJS(commitStroke)(drawSvg.value, asEraser.value, asEraser.value ? eraserSize.value : undefined);
+    })
+    .onFinalize(() => {
+      if (!drawDidEnd.value) {
+        drawSvg.value  = '';
+        asEraser.value = false;
       }
-      // Reset erase state
-      isErasing.value     = false;
-      isPalmErasing.value = false;
-      palmX.value = -200;
-      palmY.value = -200;
+      drawDidEnd.value = false;
     });
 
-  // ─── Pinch zoom (always simultaneous with main gesture) ──────────────────
-  const zoomGesture = Gesture.Pinch()
-    .onStart(() => { savedScale.value = scale.value; })
-    .onUpdate((e) => { scale.value = savedScale.value * e.scale; });
+  const all = drawGesture;
 
-  const combined = Gesture.Simultaneous(mainGesture, zoomGesture);
+  // ─── Animated styles ───────────────────────────────────────────────────────
+  const cursorStyle = useAnimatedStyle(() => {
+    // Only show the cursor block if we are actually erasing with the palm mid-stroke
+    // (We removed the old palmX/palmY since the eraser path itself provides enough visual feedback,
+    // and maintaining a moving box gets laggy/jittery. The stroke path is sufficient).
+    return {
+      opacity: 0, 
+    };
+  });
 
-  // ─── Animated styles ──────────────────────────────────────────────────────
-  const canvasTransform = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: translateX.value },
-      { translateY: translateY.value },
-      { scale: scale.value },
-    ],
-  }));
-
-  const eraserCursorStyle = useAnimatedStyle(() => ({
-    position: 'absolute',
-    left: palmX.value - PALM_ERASER_SIZE / 2,
-    top: palmY.value - PALM_ERASER_SIZE / 2,
-    width: PALM_ERASER_SIZE,
-    height: PALM_ERASER_SIZE,
-    opacity: isPalmErasing.value ? 1 : 0,
-    borderWidth: 2,
-    borderColor: '#4fc3f7',
-    backgroundColor: 'rgba(79,195,247,0.1)',
-    borderRadius: 4,
-  }));
-
-  const activePathStr = useDerivedValue(() =>
-    activeSvg.value ? activeSvg.value : 'M 0 0'
-  );
-  const activeColor = useDerivedValue(() =>
-    isErasing.value ? '#000000' : penColor
-  );
-  const activeWidth = useDerivedValue(() =>
-    isErasing.value ? PALM_ERASER_SIZE : penWidth
-  );
-  const activeBlend = useDerivedValue(() =>
-    isErasing.value ? 'clear' : 'srcOver'
-  );
+  // Live stroke values — evaluated on UI thread for zero-latency rendering
+  const liveDrawPath = useDerivedValue(() => drawSvg.value || 'M -10 -10');
+  const liveDrawCol  = useDerivedValue(() => asEraser.value ? '#000000' : penColor);
+  const liveDrawWid  = useDerivedValue(() => asEraser.value ? eraserSize.value : penWidth);
+  const liveDrawBnd  = useDerivedValue(() => asEraser.value ? 'clear' : 'srcOver');
 
   return (
-    <View style={styles.container}>
-      <GestureDetector gesture={combined}>
-        <Animated.View style={[styles.canvasContainer, canvasTransform]}>
+    <View style={styles.root}>
+      <GestureDetector gesture={all}>
+        <View style={styles.fill}>
           {backgroundUri && (
             <Image
               source={{ uri: backgroundUri }}
@@ -216,9 +185,17 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
             />
           )}
 
-          <Canvas style={styles.canvas} ref={canvasRef}>
-            {paths.map((p, i) => {
-              const sk = Skia.Path.MakeFromSVGString(p.svgPath);
+          {/* Floating Image Overlays (rendered UNDER the ink) */}
+          <ImageOverlayLayer
+            images={images}
+            onUpdate={onImagesChange}
+            isInteractive={tool === 'pan'}
+          />
+
+          {/* Skia Canvas for Ink (rendered ON TOP of images) */}
+          <Canvas style={StyleSheet.absoluteFill} ref={canvasRef} pointerEvents="none">
+            {/* Committed strokes — Skia objects pre-parsed by useMemo */}
+            {parsedPaths.map(({ p, sk }, i) => {
               if (!sk) return null;
               return (
                 <Path
@@ -234,22 +211,22 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
               );
             })}
 
-            {/* Live stroke on the UI thread — zero latency */}
+            {/* Live pen/eraser stroke */}
             <Path
-              path={activePathStr}
-              color={activeColor}
+              path={liveDrawPath}
+              color={liveDrawCol}
               style="stroke"
-              strokeWidth={activeWidth}
-              strokeCap="square"
+              strokeWidth={liveDrawWid}
+              strokeCap="round"
               strokeJoin="round"
-              blendMode={activeBlend as any}
+              blendMode={liveDrawBnd as any}
             />
           </Canvas>
-        </Animated.View>
+        </View>
       </GestureDetector>
 
-      {/* Palm eraser cursor — outside the transformed view so it's screen-fixed */}
-      <Animated.View style={eraserCursorStyle} pointerEvents="none">
+      {/* Palm eraser cursor — always in screen space */}
+      <Animated.View style={cursorStyle} pointerEvents="none">
         <View style={[styles.corner, styles.tl]} />
         <View style={[styles.corner, styles.tr]} />
         <View style={[styles.corner, styles.bl]} />
@@ -260,17 +237,16 @@ export const WhiteboardCanvas: React.FC<WhiteboardCanvasProps> = ({
 };
 
 const styles = StyleSheet.create({
-  container:       { flex: 1, overflow: 'hidden' },
-  canvasContainer: { flex: 1, width: '100%', height: '100%' },
-  canvas:          { flex: 1 },
+  root:   { flex: 1, overflow: 'hidden' },
+  fill:   { flex: 1 },
   corner: {
     position: 'absolute',
     width: 10, height: 10,
     borderColor: '#4fc3f7',
-    borderWidth: 2,
+    borderWidth: 2.5,
   },
-  tl: { top: -1, left: -1,  borderRightWidth: 0, borderBottomWidth: 0 },
-  tr: { top: -1, right: -1, borderLeftWidth: 0,  borderBottomWidth: 0 },
+  tl: { top: -1,    left: -1,  borderRightWidth: 0, borderBottomWidth: 0 },
+  tr: { top: -1,    right: -1, borderLeftWidth: 0,  borderBottomWidth: 0 },
   bl: { bottom: -1, left: -1,  borderRightWidth: 0, borderTopWidth: 0 },
   br: { bottom: -1, right: -1, borderLeftWidth: 0,  borderTopWidth: 0 },
 });

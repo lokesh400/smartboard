@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { StyleSheet, View, Text } from 'react-native';
+import { StyleSheet, View, Text, Modal } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -88,24 +88,29 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
   };
 
   return (
-    <View style={[StyleSheet.absoluteFill, { zIndex: 9999, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }]}>
-      <WebView
-        ref={webviewRef}
-        originWhitelist={['*']}
-        source={{ html: htmlContent, baseUrl: 'file:///' }}
-        allowFileAccess={true}
-        allowFileAccessFromFileURLs={true}
-        allowUniversalAccessFromFileURLs={true}
-        onMessage={handleMessage}
-        style={{ position: 'absolute', left: -10000, width: 1, height: 1 }}
-      />
-      <View style={{ backgroundColor: '#fff', padding: 30, borderRadius: 16, alignItems: 'center', elevation: 10 }}>
-        <Text style={{ fontSize: 20, fontWeight: 'bold', marginBottom: 10 }}>Importing PDF...</Text>
-        <Text style={{ fontSize: 16, color: '#666' }}>
-          {progress.total > 0 ? `Rendering page ${progress.current} of ${progress.total}` : 'Loading document...'}
-        </Text>
+    <>
+      <View style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden', opacity: 0 }}>
+        <WebView
+          ref={webviewRef}
+          originWhitelist={['*']}
+          source={{ html: htmlContent, baseUrl: 'file:///' }}
+          allowFileAccess={true}
+          allowFileAccessFromFileURLs={true}
+          allowUniversalAccessFromFileURLs={true}
+          onMessage={handleMessage}
+        />
       </View>
-      {error && <Text style={{ color: 'red', position: 'absolute', top: 50, left: 20 }}>Error loading PDF: {error}</Text>}
-    </View>
+      <Modal transparent visible={true} animationType="fade">
+        <View style={[StyleSheet.absoluteFill, { zIndex: 9999, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' }]}>
+          <View style={{ backgroundColor: '#fff', padding: 30, borderRadius: 16, alignItems: 'center', elevation: 10 }}>
+            <Text style={{ fontSize: 20, fontWeight: 'bold', marginBottom: 10 }}>Importing PDF...</Text>
+            <Text style={{ fontSize: 16, color: '#666' }}>
+              {progress.total > 0 ? `Rendering page ${progress.current} of ${progress.total}` : 'Loading document...'}
+            </Text>
+          </View>
+          {error && <Text style={{ color: 'red', position: 'absolute', top: 50, left: 20 }}>Error loading PDF: {error}</Text>}
+        </View>
+      </Modal>
+    </>
   );
 };
