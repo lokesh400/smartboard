@@ -12,6 +12,19 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
   const webviewRef = useRef<WebView>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [base64Pdf, setBase64Pdf] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const b64 = await FileSystem.readAsStringAsync(pdfUri, { encoding: FileSystem.EncodingType.Base64 });
+        setBase64Pdf(b64);
+      } catch (err) {
+        console.error('Failed to read PDF file locally', err);
+        setError('Failed to read PDF file locally');
+      }
+    })();
+  }, [pdfUri]);
 
   const htmlContent = `
   <!DOCTYPE html>
@@ -29,15 +42,24 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
     <script>
       pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
       
-      async function renderPdf() {
+      // We wait for React Native to send us the Base64 string
+      window.addEventListener("message", async function(event) {
         try {
-          // Load directly from the local file URI
-          const loadingTask = pdfjsLib.getDocument('${pdfUri}');
-          const pdf = await loadingTask.promise;
-          const totalPages = pdf.numPages;
-          const images = [];
+          const data = JSON.parse(event.data);
+          if (data.type === 'LOAD_PDF') {
+            const base64 = data.base64;
+            const binaryString = atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
 
-          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'PROGRESS', current: 0, total: totalPages }));
+            const loadingTask = pdfjsLib.getDocument({ data: bytes });
+            const pdf = await loadingTask.promise;
+            const totalPages = pdf.numPages;
+            const images = [];
+
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'PROGRESS', current: 0, total: totalPages }));
 
           for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
             const page = await pdf.getPage(pageNum);
@@ -60,10 +82,10 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
         } catch (error) {
           window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'ERROR', message: error.toString() }));
         }
-      }
-
-      // Run immediately
-      renderPdf();
+      });
+      
+      // Tell RN we are ready to receive data
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'READY' }));
     </script>
   </body>
   </html>
@@ -72,7 +94,16 @@ export const PdfRenderer: React.FC<PdfRendererProps> = ({ pdfUri, onPagesRendere
   const handleMessage = (event: WebViewMessageEvent) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === 'SUCCESS') {
+      if (data.type === 'READY') {
+        if (base64Pdf) {
+          webviewRef.current?.injectJavaScript(`
+            window.dispatchEvent(new MessageEvent('message', {
+              data: JSON.stringify({ type: 'LOAD_PDF', base64: "${base64Pdf}" })
+            }));
+            true;
+          `);
+        }
+      } else if (data.type === 'SUCCESS') {
         onPagesRendered(data.images);
       } else if (data.type === 'ERROR') {
         console.error('PDF Render Error:', data.message);
